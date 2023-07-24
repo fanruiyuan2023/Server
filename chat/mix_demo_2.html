@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - animation - keyframes</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="/three_libs/css/main.css">
+		<style>
+			body {
+				background-color: #bfe3dd;
+				color: #000;
+			}
+
+			a {
+				color: #2983ff;
+			}
+		</style>
+	</head>
+
+	<body>
+
+		<div id="container"></div>
+		<video id="local-video" autoplay></video>
+		<video id="remote-video" autoplay></video>
+		<!-- Import maps polyfill -->
+		<!-- Remove this when import maps will be widely supported -->
+		<script async src="https://unpkg.com/es-module-shims@1.3.6/dist/es-module-shims.js"></script>
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "./three_libs/build/three.module.js",
+					"three/addons/": "./three_libs/examples/jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+
+			import Stats from 'three/addons/libs/stats.module.js';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+			import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+			import {} from './node_modules/socket.io/client-dist/socket.io.js'
+
+			import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+			// 用户操作的虚拟模型的名字
+			var playerName = 'Soldier_2.glb';
+			var playerPos = {x:-2, y:1, z:0};
+			// 场景中的其他模型
+			var moduleList = [{name:'Soldier_1.glb', pos:{x:1, y:1, z:0}}];
+
+			var  module_mixer = [];
+			var currentAction = 'Idle';
+			var otherModelAction = 'Idle';
+
+			let speed = 0.01;
+			let direction = new THREE.Vector3();
+
+			const clock = new THREE.Clock();
+			const container = document.getElementById( 'container' );
+			
+			// 用户操作UI界面
+			const room_num = 100;
+			const gui = new GUI();
+			const openButton = { onClick: () => { openMic(); } };
+			const closeButton = { onClick: () => { closeMic(); } };
+			gui.add(openButton, 'onClick').name('OpenMic');
+			gui.add(closeButton, 'onClick').name('ClsoeMic');
+
+			let localStream;
+      		let remoteStream;
+			// 本地到远端的p2p连接
+      		let peerConnection;
+			const localVideo = document.getElementById('local-video');
+      		const remoteVideo = document.getElementById('remote-video');
+
+			const stats = new Stats();
+			container.appendChild( stats.dom );
+
+			const renderer = new THREE.WebGLRenderer( { antialias: true } );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			renderer.outputEncoding = THREE.sRGBEncoding;
+			container.appendChild( renderer.domElement );
+
+			const pmremGenerator = new THREE.PMREMGenerator( renderer );
+
+			const scene = new THREE.Scene();
+			scene.background = new THREE.Color( 0xbfe3dd );
+			scene.environment = pmremGenerator.fromScene( new RoomEnvironment(), 0.04 ).texture;
+
+			const camera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 1, 100 );
+			camera.position.set( 5, 2, 8 );
+
+			const controls = new OrbitControls( camera, renderer.domElement );
+			controls.target.set( 0, 0.5, 0 );
+			controls.update();
+			controls.enablePan = false;
+			controls.enableDamping = true;
+
+			const dracoLoader = new DRACOLoader();
+			dracoLoader.setDecoderPath( './three_libs/examples/jsm/libs/draco/gltf/' );
+
+			registerEvent();
+
+			loadModule(playerName, playerPos.x, playerPos.y, playerPos.z);
+			loadModulesByConfig(moduleList);
+
+			var socket = io('http://localhost:3000');
+			// 开始进入房间
+			enterRoom();
+
+			// 角色之间的交互
+			socket.on('chat message', function(msg) {
+				//console.log(msg);
+				updateOtherModules(msg);
+			});
+			// 以下是开麦之间的交互
+			// 接收到对方的媒体信息，并发送应答 answer
+			socket.on('offer', offer => {
+				console.log('recv offer...');
+				alert('朋友邀请您语音连接，是否接受?');
+				/*
+				const result = window.confirm('朋友邀请您语音连接，是否接受?');
+				if (result === false) {
+					socket.emit('refuse', room_num, 'refuse_connect');
+					return;
+				} 
+				*/
+				localVideo.style.display = 'block';
+				remoteVideo.style.display = 'block';
+				navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+				.then(stream => {
+					remoteStream = stream;
+					remoteVideo.srcObject = stream;
+					peerConnection = createPeerConnection(stream);
+					peerConnection.setRemoteDescription(offer);
+					peerConnection.createAnswer()
+					.then(answer => {
+						peerConnection.setLocalDescription(answer);
+						//console.log('send answer...');
+						socket.emit('answer', room_num, answer);
+					})
+					.catch(error => {
+						console.error(error);
+					});
+				})
+				.catch(error => {
+					console.error(error);
+				});
+			});
+
+			// 接收到对方拒绝语音连接的消息
+			socket.on('refuse', command => {
+				console.log('refuse...');
+				closeMedia();
+			});			
+
+			// 接收到对方发来的回应 answer
+			socket.on('answer', answer => {
+				console.log('recv answer...');
+				if(peerConnection){
+				peerConnection.setRemoteDescription(answer);
+				}
+
+			});
+
+			socket.on('ice-candidate', candidate => {
+				console.log('recv ice-candidater...');
+				if(peerConnection){
+				peerConnection.addIceCandidate(candidate);
+				}
+			});
+
+			socket.on('closeMedia', command => {
+				console.log('closeMedia...');
+				alert('对方终止了语音聊天');
+				closeMedia();
+			});
+
+
+			// 在 3 秒钟后执行一次函数
+			setInterval(function() {
+				sendMyInfo();
+			}, 20);
+
+
+			window.onresize = function () {
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+			};
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+				const delta = clock.getDelta();
+				//mixer.update( delta );
+				for(var i=0;i<module_mixer.length;i++){
+					module_mixer[i][2].update(delta);
+				}
+				playerMove();
+				controls.update();
+				stats.update();
+				renderer.render( scene, camera );
+
+			}
+
+
+			function playerMove(){
+				let character = getModuleByName(playerName)[1];
+				// 计算角色的旋转角度
+				const angle = Math.atan2(direction.x, direction.z);
+				character.rotation.y = angle;
+
+				// 计算角色的移动距离
+				const distance = direction.length();
+				character.translateZ(-distance * speed);
+			}
+
+			function loadModule(moduleName, x, y, z){
+				const loader = new GLTFLoader();
+				loader.setDRACOLoader( dracoLoader );
+				loader.load( './three_libs/modules/' + moduleName, function ( gltf ) {
+
+					const model = gltf.scene;
+					model.position.set( x, y, z );
+					model.rotation.set(0,30,0);
+					//model.scale.set( 0.01, 0.01, 0.01 );
+					scene.add( model );
+
+					const mixer = new THREE.AnimationMixer( model );
+					mixer.clipAction( gltf.animations[ 0 ] ).play();
+
+					module_mixer.push([moduleName, model, mixer, gltf.animations])
+
+					animate();
+
+				}, undefined, function ( e ) {
+
+					console.error( e );
+
+				} );
+			}
+
+			// 根据配置文件加载模型
+			function loadModulesByConfig(modelList){
+				for(var i=0;i<modelList.length;i++){
+					loadModule(modelList[i].name, modelList[i].pos.x,
+						modelList[i].pos.y,modelList[i].pos.z)
+				}
+			}
+
+			function registerEvent(){
+				/*
+				document.addEventListener('keydown', (event) => {
+				switch (event.code) {
+					case 'KeyA':
+						playAnimation('Walk');
+						currentAction = 'Walk';
+						break;
+					case 'KeyS':
+						playAnimation('Run');
+						currentAction = 'Run';
+						break;
+					case 'KeyD':
+						playAnimation('Idle');
+						currentAction = 'Idle';
+						break;
+					case 'KeyF':
+						playAnimation('TPose')
+						currentAction = 'TPose';					
+					// 按下 J 键更新状态
+					case 'KeyJ':
+						sendMyInfo();
+				}
+				});
+				*/
+				document.addEventListener('keydown', (event) => {
+
+					if (true){
+						if(currentAction != 'Walk'){
+							playAnimation('Walk');
+							currentAction = 'Walk';
+						}
+					}
+
+
+					switch (event.code) {
+						case 'KeyW':
+							direction.z = 1;
+							break;
+						case 'KeyS':
+							direction.z = -1;
+							break;
+						case 'KeyA':
+							direction.x = 1;
+							break;
+						case 'KeyD':
+							direction.x = -1;
+							break;
+					}
+				});			
+				
+				document.addEventListener('keyup', (event) => {
+					playAnimation('Idle');
+					currentAction = 'Idle';
+					switch (event.code) {
+						case 'KeyW':
+						case 'KeyS':
+							direction.z = 0;
+							break;
+						case 'KeyA':
+						case 'KeyD':
+							direction.x = 0;
+							break;
+					}
+				});
+				
+			}
+
+			function playAnimation(name) {
+				let module = getModuleByName(playerName);
+				let info = getModuleInfo(module[1]);
+				//console.log(info);
+				if(module == null){
+					return;
+				}else{
+					let mixer = module[2];
+					let animations = module[3];
+					mixer.stopAllAction();
+					const animation = animations.find((animation) => animation.name === name);
+					if (animation) {
+						//mixer = new THREE.AnimationMixer(character);
+						const action = mixer.clipAction(animation);
+						action.play();
+					}					
+				}
+			}
+
+			function getModuleByName(moduleName){
+				for(var i=0;i<module_mixer.length;i++){
+					if(moduleName == module_mixer[i][0]){
+						return module_mixer[i];
+					}
+				}
+				return null;
+			}
+
+			function getModuleInfo(module){
+				var rot = new THREE.Vector3(module.rotation.x,module.rotation.y,module.rotation.z);
+				var info = {'name':playerName,'position':module.position,'rotation':rot,
+							'scale':module.scale, 'action':currentAction};
+				return info;
+			}
+
+			// 向服务器通告我的状态
+			function sendMyInfo(){
+				var temp= getModuleByName(playerName);
+				if(temp == null){
+					return;
+				}
+				var module = temp[1];
+				var info = getModuleInfo(module);
+				socket.emit('chat message', info);
+			}
+
+			// 更新其他模型信息
+			function updateOtherModules(info){
+				var t = getModuleByName(info.name);
+				if(t == null){
+					return;
+				}
+				var module = t[1];
+				module.position.set(info.position.x, info.position.y, info.position.z);
+				module.rotation.set(info.rotation.x, info.rotation.y, info.rotation.z);
+				module.scale.set(info.scale.x, info.scale.y, info.scale.z);
+				
+				let mixer = t[2];
+				let animations = t[3];
+				if(otherModelAction != info.action){
+					mixer.stopAllAction();
+					const animation = animations.find((animation) => animation.name === info.action);
+					if (animation) {
+						const action = mixer.clipAction(animation);
+						action.play();
+						otherModelAction = info.action;
+					}
+				}
+
+				
+			}
+
+			// 进入房间
+			function enterRoom(){
+				console.log('send root number...')
+        		socket.emit('join', room_num);
+			}
+
+			// 开启Mic
+			function openMic(){
+				navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+				.then(stream => {
+					localStream = stream;
+					localVideo.srcObject = stream;
+					console.log('send offer...');
+					socket.emit('offer', room_num, createOffer(stream));
+				})
+				.catch(error => {
+					console.error(error);
+				});
+
+				localVideo.style.display = 'none';
+				remoteVideo.style.display = 'none';
+
+			}
+
+			// 关闭mic
+			function closeMic(){
+				if(socket){
+					closeMedia();
+					socket.emit('closeMedia',room_num,'close');
+				}
+			}
+
+			// 向对方发送本地媒体信息 offer
+			function createOffer(stream) {
+				const peerConnection = createPeerConnection(stream);
+				peerConnection.createOffer()
+				.then(offer => {
+					peerConnection.setLocalDescription(offer);
+					console.log('send offer');
+					socket.emit('offer', room_num, offer);
+				})
+				.catch(error => {
+					console.error(error);
+				});
+			}			
+
+			// 创建点对点连接
+			function createPeerConnection(stream) {
+				peerConnection = new RTCPeerConnection({
+				iceServers: [
+					{ urls: 'stun:stun.l.google.com:19302' },
+					{ urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+					{ urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+					username: 'your-username',
+					credential: 'your-password' },
+					{ urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+					username: 'your-username',
+					credential: 'your-password' }
+				]
+				});
+				stream.getTracks().forEach(track => {
+				peerConnection.addTrack(track, stream);
+				});
+				peerConnection.onicecandidate = event => {
+				if (event.candidate) {
+					console.log('send ice-candidate...');
+					socket.emit('ice-candidate', room_num, event.candidate);
+				}
+				};
+				return peerConnection;
+			}
+
+			function closeMedia(){
+				if(localStream){
+					var local_tracks = localStream.getTracks();
+					for(var i=0;i<local_tracks.length;i++){
+						local_tracks[i].stop()
+					}
+				}
+				if(remoteStream){
+					var remote_tracks = remoteStream.getTracks();
+					for(var i=0;i<remote_tracks.length;i++){
+						remote_tracks[i].stop()
+					}
+				}
+				localVideo.style.display = 'none';
+				remoteVideo.style.display = 'none';        
+			}
+
+		</script>
+
+	</body>
+
+</html>

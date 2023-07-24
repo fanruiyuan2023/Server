@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>WebRTC Example</title>
+  </head>
+  <body>
+    <h1>WebRTC Example</h1>
+    <div>
+      <label for="room-input">Room:</label>
+      <input type="text" id="room-input">
+      <button id="join-button">Join</button>
+      <button id="start-button">Start</button>
+      <button id="close_button">Close</button>
+    </div>
+    <div>
+      <h2>Local Video</h2>
+      <video id="local-video" autoplay></video>
+    </div>
+    <div>
+      <h2>Remote Video</h2>
+      <video id="remote-video" autoplay></video>
+    </div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+
+      let socket = io();
+      const roomInput = document.getElementById('room-input');
+      const joinButton = document.getElementById('join-button');
+      const startButton = document.getElementById('start-button');
+      const closeButton = document.getElementById('close_button');
+      const localVideo = document.getElementById('local-video');
+      const remoteVideo = document.getElementById('remote-video');
+      let localStream;
+      let remoteStream;
+      let room = '';
+      let peerConnection;
+
+      joinButton.addEventListener('click', () => {
+        room = roomInput.value;
+        console.log('btn clicked...');
+        console.log('send root number...')
+        socket.emit('join', room);
+
+        /*
+        // 获取本地媒体流对象，并告知对方 offer。
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          .then(stream => {
+            localStream = stream;
+            localVideo.srcObject = stream;
+            console.log('send offer...');
+            socket.emit('offer', room, createOffer(stream));
+          })
+          .catch(error => {
+            console.error(error);
+          });
+          */
+      });
+
+      startButton.addEventListener('click', () => {
+        // 获取本地媒体流对象，并告知对方 offer。
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          .then(stream => {
+            localStream = stream;
+            localVideo.srcObject = stream;
+            console.log('send offer...');
+            socket.emit('offer', room, createOffer(stream));
+          })
+          .catch(error => {
+            console.error(error);
+          });
+
+          localVideo.style.display = 'block';
+          remoteVideo.style.display = 'block';
+      });
+
+      closeButton.addEventListener('click', () => {
+        if(socket){
+          closeMedia();
+          socket.emit('closeMedia',roomInput.value,'close');
+        }
+
+      })
+
+      // 接收到对方的媒体信息，并发送应答 answer
+      socket.on('offer', offer => {
+        console.log('recv offer...');
+        localVideo.style.display = 'block';
+        remoteVideo.style.display = 'block';
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          .then(stream => {
+            remoteStream = stream;
+            remoteVideo.srcObject = stream;
+            peerConnection = createPeerConnection(stream);
+            peerConnection.setRemoteDescription(offer);
+            peerConnection.createAnswer()
+              .then(answer => {
+                peerConnection.setLocalDescription(answer);
+                console.log('send answer...');
+                socket.emit('answer', roomInput.value, answer);
+              })
+              .catch(error => {
+                console.error(error);
+              });
+          })
+          .catch(error => {
+            console.error(error);
+          });
+      });
+
+      // 接收到对方发来的回应 answer
+      socket.on('answer', answer => {
+        console.log('recv answer...');
+        if(peerConnection){
+          peerConnection.setRemoteDescription(answer);
+        }
+
+      });
+
+      socket.on('ice-candidate', candidate => {
+        console.log('recv ice-candidater...');
+        if(peerConnection){
+          peerConnection.addIceCandidate(candidate);
+        }
+      });
+
+      socket.on('closeMedia', command => {
+        console.log('closeMedia...');
+        closeMedia();
+      });
+
+      // 向对方发送本地媒体信息 offer
+      function createOffer(stream) {
+        const peerConnection = createPeerConnection(stream);
+        peerConnection.createOffer()
+          .then(offer => {
+            peerConnection.setLocalDescription(offer);
+            console.log('send offer');
+            socket.emit('offer', roomInput.value, offer);
+          })
+          .catch(error => {
+            console.error(error);
+          });
+      }
+
+      // 创建点对点连接
+      function createPeerConnection(stream) {
+        peerConnection = new RTCPeerConnection({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+            { urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+              username: 'your-username',
+              credential: 'your-password' },
+            { urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+              username: 'your-username',
+              credential: 'your-password' }
+          ]
+        });
+        stream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, stream);
+        });
+        peerConnection.onicecandidate = event => {
+          if (event.candidate) {
+            console.log('send ice-candidate...');
+            socket.emit('ice-candidate', roomInput.value, event.candidate);
+          }
+        };
+        return peerConnection;
+      }
+
+      function closeMedia(){
+        if(localStream){
+            local_tracks = localStream.getTracks();
+            for(var i=0;i<local_tracks.length;i++){
+              local_tracks[i].stop()
+            }
+          }
+          if(remoteStream){
+            remote_tracks = remoteStream.getTracks();
+            for(var i=0;i<remote_tracks.length;i++){
+              remote_tracks[i].stop()
+            }
+          }
+          localVideo.style.display = 'none';
+          remoteVideo.style.display = 'none';        
+      }
+    </script>
+  </body>
+</html>
